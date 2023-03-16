@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from thop import profile
-from torchsummary import summary
 
 
 

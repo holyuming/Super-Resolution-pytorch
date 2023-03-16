@@ -27,7 +27,7 @@ class datasetSR(Dataset):
         self.imagelist2 = sorted(self.imagelist2)
         assert (len(self.imagelist1) == len(self.imagelist2))
 
-        print(f'Number of LR imgs (pathces): {str(len(self.imagelist1)):6s}, Number of HR imgs (patches): {str(len(self.imagelist2)):6s}')
+        print(f'Number of LR imgs (patches): {str(len(self.imagelist1)):6s}, Number of HR imgs (patches): {str(len(self.imagelist2)):6s}')
 
 
     def __getitem__(self, index):

@@ -388,10 +388,11 @@ class BasicBlock(nn.Module):
         self.conv = nn.Conv2d(in_channel, out_channel, 3, 1, 1)
 
     def forward(self, x, x_size):
+        shortcut = x
         x = self.patch_embed(x)
         for block in self.blocks:
             x = block(x, x_size)
-        x = self.patch_unembed(x, x_size)
+        x = self.patch_unembed(x, x_size) + shortcut
         x = self.conv(x)    # from input_dim --> output_dim
         return x
 
@@ -481,7 +482,7 @@ class LapSUNET(nn.Module):
 
 if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = LapSUNET(dim=12, depth=3, num_heads=3, mlp_ratio=2).to(device)
+    model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2).to(device)
     summary(model, (3, 256, 256))
     Img = torch.randn(1, 3, 256, 256).to(device)
     Out = model(Img)

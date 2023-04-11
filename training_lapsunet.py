@@ -26,7 +26,6 @@ def parse():
     parser.add_argument('--batch', type=int, default=8)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--scale', type=int, default=3)
-    # parser.add_argument('--evalset', type=str, default='testsets/Set5')
     parser.add_argument('--train', type=bool, default=False)
     parser.add_argument('--savedir', type=str, default=None)
     args = parser.parse_args()
@@ -58,7 +57,7 @@ if __name__ == '__main__':
     batch_size = args.batch
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=300, eta_min=0.01*args.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0.05*args.lr)
     epoch = 0
 
     # Loading from best
@@ -157,6 +156,7 @@ if __name__ == '__main__':
                     # ==============================================================
 
             epoch += 1
+            scheduler.step()
 
             # save checkpoint every epoch
             torch.save({

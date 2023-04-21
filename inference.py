@@ -67,6 +67,43 @@ def test(img_lq, model, args):
 
     return output
 
+def demo_UHD_fast(img, model):
+    # test the image tile by tile
+    # print(img.shape) # [1, 3, 2048, 1152] for ali forward data
+    scale = 3
+    b, c, h, w = img.size()
+    tile = min(256, h, w)
+    tile_overlap = 0
+    stride = tile - tile_overlap
+    
+    h_idx_list = list(range(0, h-tile, stride)) + [h-tile]
+    w_idx_list = list(range(0, w-tile, stride)) + [w-tile]
+    E = torch.zeros(b, c, h*scale, w*scale).type_as(img)
+    W = torch.zeros_like(E)
+    
+    in_patch = []
+    # append all 256x256 patches in a batch with size = 135
+    for h_idx in h_idx_list:
+        for w_idx in w_idx_list:
+            in_patch.append(img[..., h_idx:h_idx+tile, w_idx:w_idx+tile].squeeze(0))
+
+    in_patch = torch.stack(in_patch, 0)
+    # print(in_patch.shape)
+    
+    out_patch = model(in_patch)
+    
+    for ii, h_idx in enumerate(h_idx_list):
+        for jj, w_idx in enumerate(w_idx_list):
+            idx = ii * len(w_idx_list) + jj
+            # print(idx)
+            out_patch_mask = torch.ones_like(out_patch[idx])
+
+            E[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch[idx])
+            W[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch_mask)
+            
+            
+    output = E.div_(W)
+    return output
 
 
 def main():
@@ -75,15 +112,19 @@ def main():
     # basic setup
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     img = torch.randn(1, 3, 256, 256).to(device)
-    model = LapSUNET(dim=12, depth=2, num_heads=3, mlp_ratio=2).to(device)
+    model = LapSUNET(dim=14, depth=2, num_heads=[2, 4], mlp_ratio=2)
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
+    print(f'Flops: {macs * 2 * 15 * 60 / 1e9} G, for 720p cut into 15 patches and 60fps.')
+
+    model = model.to(device)
+    model = nn.DataParallel(model)
 
     # load from best
     model_path = args.model_path
     if os.path.exists(model_path):
         print(f'Loading from {model_path}')
-        checkpoint = torch.load(model_path)
+        checkpoint = torch.load(model_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
 
 
@@ -107,7 +148,7 @@ def main():
             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-            output = test(img_lq, model, args)
+            output = demo_UHD_fast(img_lq, model)
             output = output[..., :h_old * args.scale, :w_old * args.scale]
 
         # save image

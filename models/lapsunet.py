@@ -6,6 +6,7 @@ import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from thop import profile
 from torchsummary import summary
+import os
 
 
 class Reconstruct(nn.Module):
@@ -432,7 +433,7 @@ class Upsample(nn.Module):
 
 
 class LapSUNET(nn.Module):
-    def __init__(self, depth=4, downblock=Downsample, upblock=Upsample, dim=18, num_heads=2, mlp_ratio=2) -> None:
+    def __init__(self, depth=4, downblock=Downsample, upblock=Upsample, dim=18, num_heads=[2, 4], mlp_ratio=2, norm=nn.LayerNorm) -> None:
         super(LapSUNET, self).__init__()
         self.depth = depth
 
@@ -443,19 +444,20 @@ class LapSUNET(nn.Module):
         n_dim = dim
         self.downs = nn.ModuleList()
         for _ in range(depth):
-            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads, mlp_ratio=mlp_ratio))
+            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads[_], mlp_ratio=mlp_ratio))
             n_dim *= 2
 
 
         # Upward path
         self.ups = nn.ModuleList()
         for _ in range(depth):
-            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads, mlp_ratio=mlp_ratio))
+            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads[-1*(_+1)], mlp_ratio=mlp_ratio))
             n_dim //= 2
 
         
         # Reconstruction
         self.Reconstruction = Reconstruct(n_dim, 3)
+        self.conv = nn.Conv2d(3, 3, 3, 1, 1)
 
 
 
@@ -475,14 +477,16 @@ class LapSUNET(nn.Module):
 
         # Reconstruction
         x = self.Reconstruction(x)
+        # x = self.conv(x)
 
         return x
 
 
 
 if __name__ == '__main__':
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2).to(device)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = LapSUNET(dim=12, depth=2, num_heads=[2, 4], mlp_ratio=2).to(device)
     summary(model, (3, 256, 256))
     Img = torch.randn(1, 3, 256, 256).to(device)
     Out = model(Img)

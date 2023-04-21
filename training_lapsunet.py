@@ -32,18 +32,67 @@ def parse():
     return args
 
 
+def demo_UHD_fast(img, model):
+    # test the image tile by tile
+    # print(img.shape) # [1, 3, 2048, 1152] for ali forward data
+    scale = 3
+    b, c, h, w = img.size()
+    tile = min(256, h, w)
+    tile_overlap = 0
+    stride = tile - tile_overlap
+    
+    h_idx_list = list(range(0, h-tile, stride)) + [h-tile]
+    w_idx_list = list(range(0, w-tile, stride)) + [w-tile]
+    E = torch.zeros(b, c, h*scale, w*scale).type_as(img)
+    W = torch.zeros_like(E)
+    
+    in_patch = []
+    # append all 256x256 patches in a batch with size = 135
+    for h_idx in h_idx_list:
+        for w_idx in w_idx_list:
+            in_patch.append(img[..., h_idx:h_idx+tile, w_idx:w_idx+tile].squeeze(0))
+
+    in_patch = torch.stack(in_patch, 0)
+    # print(in_patch.shape)
+    
+    out_patch = model(in_patch)
+    
+    for ii, h_idx in enumerate(h_idx_list):
+        for jj, w_idx in enumerate(w_idx_list):
+            idx = ii * len(w_idx_list) + jj
+            # print(idx)
+            out_patch_mask = torch.ones_like(out_patch[idx])
+
+            E[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch[idx])
+            W[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch_mask)
+            
+            
+    output = E.div_(W)
+    return output
+
+
 
 if __name__ == '__main__':
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
     args = parse()
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    img = torch.randn(1, 3, 256, 256).to(device)
+    img = torch.randn(1, 3, 256, 256)
 
     # our model
-    model = LapSUNET(dim=12, depth=2, num_heads=3, mlp_ratio=2).to(device)
+    # without shortcut: 6.58G, 31.79
+    # model = LapSUNET(dim=12, depth=2, num_heads=3, mlp_ratio=2)
+    # with shortcut: 11.02G, 31.95
+    # model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2)
+    # with shortcut, customized num_heads: 8.63G, 
+    model = LapSUNET(dim=14, depth=2, num_heads=[2, 4], mlp_ratio=2)
 
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
+    print(f'Flops: {macs * 2 * 15 * 60 / 1e9} G, for 720p cut into 15 patches and 60fps.')
+
+    model = model.to(device)
+    model = nn.DataParallel(model)
 
     # model path
     model_save_path = 'pretrained_weight/lapsunet/bullshit_training_lapsunet.pth'
@@ -90,10 +139,10 @@ if __name__ == '__main__':
     GT_valid_path = ["/data/SR/Set5/original/"]   # 5 pic
 
     train_ds = datasetSR(lq_paths=LQ_train_path, gt_paths=GT_train_path)
-    train_dl = DataLoader(train_ds, shuffle=True, batch_size=batch_size)
+    train_dl = DataLoader(train_ds, shuffle=True, batch_size=batch_size, num_workers=8)
 
     valid_ds = datasetSR(lq_paths=LQ_valid_path, gt_paths=GT_valid_path, valid=True)
-    valid_dl = DataLoader(valid_ds, shuffle=False, batch_size=1)
+    valid_dl = DataLoader(valid_ds, shuffle=False, batch_size=1, num_workers=8)
 
     # training
     print(f'================================TRAINING===============================')
@@ -132,7 +181,8 @@ if __name__ == '__main__':
                             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
                             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
                             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-                            preds = (model(img_lq)[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
+                            output = demo_UHD_fast(img_lq, model)
+                            preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
 
                         img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
                         psnr = util.psnr_tensor(preds, img_gt)
@@ -146,6 +196,7 @@ if __name__ == '__main__':
                     # save checkpoint if best
                     if psnrs.mean() > best_psnr:
                         best_psnr = psnrs.mean()
+                        print(f'BEST !!!! {best_psnr}')
                         torch.save({
                             'model_state_dict': model.state_dict(),
                             'best_psnr': best_psnr,
@@ -188,7 +239,8 @@ if __name__ == '__main__':
             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-            preds = (model(img_lq)[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
+            output = demo_UHD_fast(img_lq, model)
+            preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
 
         img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
         psnr = util.psnr_tensor(preds, img_gt)
@@ -217,7 +269,7 @@ if __name__ == '__main__':
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
 
-            output = model(img_lq)
+            output = demo_UHD_fast(img_lq, model)
             preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
             # save result img
             if args.savedir != None:

@@ -84,8 +84,10 @@ if __name__ == '__main__':
     # model = LapSUNET(dim=12, depth=2, num_heads=3, mlp_ratio=2)
     # with shortcut: 11.02G, 31.95
     # model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2)
-    # with shortcut, customized num_heads: 8.63G, 
-    model = LapSUNET(dim=14, depth=2, num_heads=[2, 4], mlp_ratio=2)
+    # with shortcut, customized num_heads: 8.63G, 31.845
+    # model = LapSUNET(dim=14, depth=2, num_heads=[2, 4], mlp_ratio=2)
+    # with LSC, modify order of blocks in downsample: 8.939G, v1.pt
+    model = LapSUNET(dim=16, depth=2, num_heads=[2, 4])
 
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
@@ -95,9 +97,8 @@ if __name__ == '__main__':
     model = nn.DataParallel(model)
 
     # model path
-    model_save_path = 'pretrained_weight/lapsunet/bullshit_training_lapsunet.pth'
-    model_checkpoint_path = 'checkpoints/lapsunet.pt'
-    model_best_path = 'checkpoints/lapsunet_best.pt'
+    model_checkpoint_path = 'checkpoints/lapsunet_v1.pt'
+    model_best_path = 'checkpoints/lapsunet_best_v1.pt'
 
     # basic setup
     best_psnr = 0
@@ -106,7 +107,7 @@ if __name__ == '__main__':
     batch_size = args.batch
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0.05*args.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.05*args.lr)
     epoch = 0
 
     # Loading from best
@@ -132,8 +133,8 @@ if __name__ == '__main__':
     # datasets & dataloaders
     # for each training data --> input size = (B, 3, 256, 256), output size = (B, 3, 768, 768)
     # I generate those 256 x 256 sub images w/ utils/img_proc.py
-    LQ_train_path = ['/data/SR/div2k/LRbicx3', '/data/SR/flickr2k/LRbicx3']      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
-    GT_train_path = ['/data/SR/div2k/original', '/data/SR/flickr2k/original']    # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    LQ_train_path = ['/data/SR/div2k/LRbicx3', '/data/SR/flickr2k/LRbicx3', '/data/SR/div2k/LRunkx3', '/data/SR/flickr2k/LRunkx3']      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    GT_train_path = ['/data/SR/div2k/original', '/data/SR/flickr2k/original', '/data/SR/div2k/original', '/data/SR/flickr2k/original']  # 800 pic + 2650 pic -> 5088 patches + 16377 patches
 
     LQ_valid_path = ["/data/SR/Set5/LRbicx3/"]    # 5 pic
     GT_valid_path = ["/data/SR/Set5/original/"]   # 5 pic

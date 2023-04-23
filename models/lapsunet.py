@@ -399,13 +399,16 @@ class BasicBlock(nn.Module):
 
 
 class Downsample(nn.Module):
-    def __init__(self, in_channel, out_channel, num_heads=2, mlp_ratio=4) -> None:
+    def __init__(self, in_channel, out_channel, num_heads=2, mlp_ratio=4, patch_size=4, window_size=8, img_size=256) -> None:
         super(Downsample, self).__init__()
-        self.block = BasicBlock(in_channel=in_channel, out_channel=out_channel, 
+        self.block = BasicBlock(in_channel=in_channel, out_channel=in_channel, 
                                 num_heads=num_heads,
-                                mlp_ratio=mlp_ratio
+                                mlp_ratio=mlp_ratio,
+                                patch_size=patch_size,
+                                window_size=window_size,
+                                img_size=img_size
                                 )
-        self.pool = nn.Conv2d(out_channel, out_channel, kernel_size=4, stride=2, padding=1)
+        self.pool = nn.Conv2d(in_channel, out_channel, kernel_size=4, stride=2, padding=1)
 
     def forward(self, x):
         x_size = (x.shape[2], x.shape[3])
@@ -415,12 +418,16 @@ class Downsample(nn.Module):
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channel, out_channel, num_heads=2, mlp_ratio=4) -> None:
+    def __init__(self, in_channel, out_channel, num_heads=2, mlp_ratio=4, patch_size=4, window_size=8, img_size=256) -> None:
         super(Upsample, self).__init__()
         self.up = nn.ConvTranspose2d(in_channel, out_channel, kernel_size=2, stride=2)
         self.block = BasicBlock(in_channel=in_channel, out_channel=out_channel,
                                 num_heads=num_heads,
-                                mlp_ratio=mlp_ratio)
+                                mlp_ratio=mlp_ratio,
+                                patch_size=patch_size,
+                                window_size=window_size,
+                                img_size=img_size
+                                )
 
         self.conv = nn.Conv2d(in_channels=out_channel, out_channels=out_channel, kernel_size=3, stride=1, padding=1)
 
@@ -433,7 +440,15 @@ class Upsample(nn.Module):
 
 
 class LapSUNET(nn.Module):
-    def __init__(self, depth=4, downblock=Downsample, upblock=Upsample, dim=18, num_heads=[2, 4], mlp_ratio=2, norm=nn.LayerNorm) -> None:
+    def __init__(self, 
+                 depth=2, 
+                 img_size=256,
+                 downblock=Downsample, 
+                 upblock=Upsample, dim=18, 
+                 num_heads=[2, 4], 
+                 mlp_ratio=2, 
+                 patch_size=[4, 4], 
+                 norm=nn.LayerNorm) -> None:
         super(LapSUNET, self).__init__()
         self.depth = depth
 
@@ -442,17 +457,19 @@ class LapSUNET(nn.Module):
         
         # Downward path
         n_dim = dim
+        imgsz = img_size
         self.downs = nn.ModuleList()
         for _ in range(depth):
-            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads[_], mlp_ratio=mlp_ratio))
+            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads[_], mlp_ratio=mlp_ratio, patch_size=patch_size[_], img_size=imgsz))
             n_dim *= 2
-
+            imgsz //= 2
 
         # Upward path
         self.ups = nn.ModuleList()
         for _ in range(depth):
-            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads[-1*(_+1)], mlp_ratio=mlp_ratio))
+            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads[-1*(_+1)], mlp_ratio=mlp_ratio, patch_size=patch_size[-1*(_+1)], img_size=imgsz*2))
             n_dim //= 2
+            imgsz *= 2
 
         
         # Reconstruction
@@ -464,6 +481,7 @@ class LapSUNET(nn.Module):
     def forward(self, x):
         # shallow feature extraction
         x = self.shallow_feature_extraction(x)
+        LSC = x
 
         # Downward path
         skips = []
@@ -476,6 +494,7 @@ class LapSUNET(nn.Module):
             x = up(skip, x)
 
         # Reconstruction
+        x = x + LSC
         x = self.Reconstruction(x)
         # x = self.conv(x)
 
@@ -486,7 +505,7 @@ class LapSUNET(nn.Module):
 if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = LapSUNET(dim=12, depth=2, num_heads=[2, 4], mlp_ratio=2).to(device)
+    model = LapSUNET(dim=16, depth=2, num_heads=[2, 4], mlp_ratio=2).to(device)
     summary(model, (3, 256, 256))
     Img = torch.randn(1, 3, 256, 256).to(device)
     Out = model(Img)
@@ -494,3 +513,4 @@ if __name__ == '__main__':
     print('Output shape : ', Out.shape)
     macs, params = profile(model, inputs=(Img, ))
     print('macs: {} G, flops: {} G'.format(macs / 1e9, macs * 2 / 1e9))
+    print(f'FLOPs for 720p --> 2160p (15 patches), 60fps: {macs * 2 * 15 * 60 / 1e9 / 1000} T')

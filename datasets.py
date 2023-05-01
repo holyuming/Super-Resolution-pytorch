@@ -26,8 +26,10 @@ class datasetSR(Dataset):
         for gt_path in gt_paths:
             self.imagelist2 = self.imagelist2 + glob.glob(os.path.join(gt_path, '*'))
 
-        # self.imagelist1 = sorted(self.imagelist1)
-        # self.imagelist2 = sorted(self.imagelist2)
+        # =============== Need to add these two lines when training at TWCC ==============
+        self.imagelist1 = sorted(self.imagelist1)
+        self.imagelist2 = sorted(self.imagelist2)
+        # ================================================================================
         assert (len(self.imagelist1) == len(self.imagelist2))
         for idx in range(len(self.imagelist1)):
             path1 = os.path.basename(self.imagelist1[idx]).replace('x3', '')
@@ -79,15 +81,15 @@ if __name__ == '__main__':
 
     batch_size = 64
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    lq_paths = ['/data/SR/div2k/LRbicx3', '/data/SR/flickr2k/LRbicx3', '/data/SR/div2k/LRunkx3', '/data/SR/flickr2k/LRunkx3']
-    gt_paths= ['/data/SR/div2k/original', '/data/SR/flickr2k/original', '/data/SR/div2k/original', '/data/SR/flickr2k/original']
+    lq_paths = ["/work/u0810886/SR/div2k/LRbicx3/", "/work/u0810886/SR/flickr2k/LRbicx3/"]
+    gt_paths = ["/work/u0810886/SR/div2k/original/", "/work/u0810886/SR/flickr2k/original/"]
     ds = datasetSR(lq_paths=lq_paths, gt_paths=gt_paths)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=16)
 
     iteration = 0
     t1 = time.time()
     for lq, gt in dl:
-        print(lq.shape, gt.shape, iteration)
+        # print(lq.shape, gt.shape, iteration)
         iteration += 1
         # assert lq.shape == gt.shape
     t2 = time.time()

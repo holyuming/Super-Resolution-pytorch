@@ -16,105 +16,138 @@ from torchvision import transforms
 from torch.utils.data.dataloader import DataLoader
 from models.swinir import SwinIR
 from utils import util_calculate_psnr_ssim as util
+import torch_optimizer
 
 from thop import profile
 
 
 def parse():
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--trainset', type=str, default='testsets/Set5')
     parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--batch', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--scale', type=int, default=3)
-    parser.add_argument('--evalset', type=str, default='testsets/Set5')
     parser.add_argument('--train', type=bool, default=False)
     parser.add_argument('--savedir', type=str, default=None)
     args = parser.parse_args()
     return args
 
+def demo_UHD_fast(img, model):
+    # test the image tile by tile
+    # print(img.shape) # [1, 3, 2048, 1152] for ali forward data
+    scale = 3
+    b, c, h, w = img.size()
+    tile = min(256, h, w)
+    tile_overlap = 0
+    stride = tile - tile_overlap
+    
+    h_idx_list = list(range(0, h-tile, stride)) + [h-tile]
+    w_idx_list = list(range(0, w-tile, stride)) + [w-tile]
+    E = torch.zeros(b, c, h*scale, w*scale).type_as(img)
+    W = torch.zeros_like(E)
+    
+    in_patch = []
+    # append all 256x256 patches in a batch with size = 135
+    for h_idx in h_idx_list:
+        for w_idx in w_idx_list:
+            in_patch.append(img[..., h_idx:h_idx+tile, w_idx:w_idx+tile].squeeze(0))
+
+    in_patch = torch.stack(in_patch, 0)
+    # print(in_patch.shape)
+    
+    out_patch = model(in_patch)
+    
+    for ii, h_idx in enumerate(h_idx_list):
+        for jj, w_idx in enumerate(w_idx_list):
+            idx = ii * len(w_idx_list) + jj
+            # print(idx)
+            out_patch_mask = torch.ones_like(out_patch[idx])
+
+            E[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch[idx])
+            W[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch_mask)
+            
+            
+    output = E.div_(W)
+    return output
 
 
 if __name__ == '__main__':
     args = parse()
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # original model
     # model pretrained weight path = 'pretrained_weight/swinir/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x3.pth'
-    model = SwinIR(upscale=args.scale, in_chans=3, img_size=64, window_size=8,
-                img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
-                mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
+    # model = SwinIR(upscale=args.scale, in_chans=3, img_size=64, window_size=8,
+    #             img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
+    #             mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
 
+    img = torch.randn(1, 3, 256, 256).to(device)
 
-    # img = torch.randn(16, 3, 256, 256).to(device)
-    img = torch.randn(1, 3, 1280, 720).to(device)
 
     # our model
-    # best psnr = 28 on set5, batch = 8
+    # v1
     model = SwinIR(upscale=args.scale, in_chans=3, img_size=256, window_size=8,
-                img_range=1., depths=[2, 2, 2], embed_dim=24, num_heads=[2, 2, 2],
-                mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
-
-    # best psnr = 29.35, batch = 8, lr = 1e-3, epochs = 5
-    # best psnr = , batch = 8, lr = 1e-3, epochs = 1, with transform
-    model = SwinIR(upscale=args.scale, in_chans=3, img_size=256, window_size=8,
-                img_range=1., depths=[2, 2, 2, 2], embed_dim=24, num_heads=[2, 2, 2, 1],
-                mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
-
-    # best psnr = 29.31, batch = 8, lr = 1e-3, epochs = 5, num_heads[2, 2, 2, 1]
-    # best psnr = 20.50, batch = 8, lr = 1e-3, epochs = 1, num_heads[2, 2, 2, 1], with transform(have some issues)
-    # best psnr = 31.54, batch = 8, lr = 1e-3, epochs = 50, num_heads[2, 2, 2, 1]
-    # best psnr = 31.54, batch = 8, lr = 1e-3, epochs = 15, num_heads[2, 2, 2, 1], div2k, flickr2k
-    model = SwinIR(upscale=args.scale, in_chans=3, img_size=256, window_size=8,
-                img_range=1., depths=[2, 2, 2, 2], embed_dim=24, num_heads=[2, 2, 2, 1],
+                img_range=1., depths=[2, 2, 2, 2], embed_dim=24, num_heads=[3, 3, 3, 3],
                 mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
 
     # model path
-    model_save_path = 'pretrained_weight/swinir/swinir_x3.pth'
-    model_checkpoint_path = 'checkpoints/swinir_x3.pt'
-
-    model = model.to(device)
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
+    print(f'Flops: {macs * 2 * 15 * 60 / 1e9} G, for 720p cut into 15 patches and 60fps.')
 
+    model = model.to(device)
+    model = nn.DataParallel(model)
+
+    # model path
+    model_checkpoint_path = 'checkpoints/swinir_v1.pt'
+    model_best_path = 'checkpoints/swinir_v1_best.pt'
 
     # basic setup
     best_psnr = 0
     checkpoint = None
-
-    if os.path.exists(model_checkpoint_path):
-        checkpoint = torch.load(model_checkpoint_path)
-        best_psnr = checkpoint['best_psnr']
-        print('Best PSNR: ', best_psnr)
-        if input(f'Do you want to load from checkpoint: {model_checkpoint_path} ? (y/n) ') == 'y':
-            print(f'Loading state_dict from {model_checkpoint_path}')
-            model.load_state_dict(checkpoint['model_state_dict'])
-
-    model = model.to(device)
     epochs = args.epochs
     batch_size = args.batch
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # optimizer = torch_optimizer.Lamb(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.1*args.lr)
+    epoch = 0
+
+    # Loading from best
+    if os.path.exists(model_best_path):
+        print(f'Loading state_dict from {model_best_path}')
+        checkpoint = torch.load(model_best_path)
+        best_psnr = checkpoint['best_psnr']
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print('Best PSNR: ', best_psnr)
+
+    # Loading from checkpoint
+    if os.path.exists(model_checkpoint_path):
+        checkpoint = torch.load(model_checkpoint_path)
+        if input(f'Do you want to load from checkpoint: {model_checkpoint_path} ? (y/n) ') == 'y':
+            print(f'Loading state_dict from {model_checkpoint_path}')
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            epoch = checkpoint['epoch']
+
+
 
 
     # datasets & dataloaders
     # for each training data --> input size = (B, 3, 256, 256), output size = (B, 3, 768, 768)
     # I generate those 256 x 256 sub images w/ utils/img_proc.py
-    LQ_train_path = ['/data/SR/div2k/LRbicx3', '/data/SR/flickr2k/LRbicx3']      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
-    GT_train_path = ['/data/SR/div2k/original', '/data/SR/flickr2k/original']    # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    LQ_train_path = ["/work/u0810886/SR/div2k/LRbicx3/", "/work/u0810886/SR/flickr2k/LRbicx3/"]      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    GT_train_path = ["/work/u0810886/SR/div2k/original/", "/work/u0810886/SR/flickr2k/original/"]    # 800 pic + 2650 pic -> 5088 patches + 16377 patches
 
-    LQ_valid_path = ["/data/SR/Set5/LRbicx3/"]    # 5 pic
-    GT_valid_path = ["/data/SR/Set5/original/"]   # 5 pic
+    LQ_valid_path = ["/work/u0810886/SR/Set5/LRbicx3/"]    # 5 pic
+    GT_valid_path = ["/work/u0810886/SR/Set5/original/"]   # 5 pic
 
     train_ds = datasetSR(lq_paths=LQ_train_path, gt_paths=GT_train_path)
-    train_dl = DataLoader(train_ds, shuffle=True, batch_size=batch_size)
+    train_dl = DataLoader(train_ds, shuffle=True, batch_size=batch_size, num_workers=8)
 
     valid_ds = datasetSR(lq_paths=LQ_valid_path, gt_paths=GT_valid_path, valid=True)
-    valid_dl = DataLoader(valid_ds, shuffle=False, batch_size=1)
-
-
-    # load pretrained model (from check point)
-    # model = torch.load(model_save_path)
+    valid_dl = DataLoader(valid_ds, shuffle=False, batch_size=1, num_workers=8)
 
     # training
     print(f'================================TRAINING===============================')
@@ -122,7 +155,8 @@ if __name__ == '__main__':
         model.train()
         min_loss = None
         time_start = datetime.now()
-        for epoch in range(epochs):
+        # for epoch in range(epochs):
+        while(epoch < epochs):
             for idx, data in enumerate(train_dl):
                 img_lq = data[0].to(device)
                 img_gt = data[1].to(device)
@@ -152,7 +186,8 @@ if __name__ == '__main__':
                             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
                             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
                             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-                            preds = (model(img_lq)[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
+                            output = demo_UHD_fast(img_lq, model)
+                            preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
 
                         img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
                         psnr = util.psnr_tensor(preds, img_gt)
@@ -163,19 +198,31 @@ if __name__ == '__main__':
                     # print(f'\nAverage PSNR: {psnrs.mean()}\n')
                     print(f'Epoch: {str(epoch):4s}, iter: {str(idx):6s}, Loss: {loss:.7f}, time: {str(time_period):.11s}, average psnr: {psnrs.mean()}')
 
-                    # save checkpoint
+                    # save checkpoint if best
                     if psnrs.mean() > best_psnr:
                         best_psnr = psnrs.mean()
+                        print(f'BEST !!!! {best_psnr}')
                         torch.save({
-                            'epoch': epoch,
                             'model_state_dict': model.state_dict(),
                             'best_psnr': best_psnr,
-                            'optimizer_state_dict': optimizer.state_dict()
-                        }, model_checkpoint_path)
+                        }, model_best_path)
 
                     model.train()
                     # ==============================================================
                     # ==============================================================
+
+            epoch += 1
+            scheduler.step()
+
+            # save checkpoint every epoch
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_psnr': best_psnr,
+            }, model_checkpoint_path)
+
 
         print(f'Minimum Loss: {min_loss}, total training time: {str(datetime.now() - time_start):.11s}')
 
@@ -197,8 +244,8 @@ if __name__ == '__main__':
             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-
-            preds = (model(img_lq)[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
+            output = demo_UHD_fast(img_lq, model)
+            preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
 
         img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
         psnr = util.psnr_tensor(preds, img_gt)
@@ -210,9 +257,9 @@ if __name__ == '__main__':
 
 
     print('Model with best loss after training:')
-    if os.path.exists(model_checkpoint_path):
-        checkpoint = torch.load(model_checkpoint_path)
-        print(f'Loading state_dict from {model_checkpoint_path}')
+    if os.path.exists(model_best_path):
+        checkpoint = torch.load(model_best_path)
+        print(f'Loading state_dict from {model_best_path}')
         model.load_state_dict(checkpoint['model_state_dict'])  
     model.eval()
     psnrs = []
@@ -227,7 +274,7 @@ if __name__ == '__main__':
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
 
-            output = model(img_lq)
+            output = demo_UHD_fast(img_lq, model)
             preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
             # save result img
             if args.savedir != None:
@@ -237,7 +284,7 @@ if __name__ == '__main__':
                 if save_img.ndim == 3:
                     save_img = np.transpose(save_img[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HCW-BGR
                 save_img = save_img[:h_old*args.scale, :w_old*args.scale].astype(np.uint8)  # float32 to uint8
-                cv2.imwrite(os.path.join(args.savedir, f'{img_name}'), save_img)
+                cv2.imwrite(os.path.join(args.savedir, img_name), save_img)
 
         img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
 

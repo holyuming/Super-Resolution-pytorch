@@ -16,6 +16,7 @@ from torchvision import transforms
 from torch.utils.data.dataloader import DataLoader
 from models.lapsunet import LapSUNET
 from utils import util_calculate_psnr_ssim as util
+import torch_optimizer
 
 from thop import profile
 
@@ -73,9 +74,10 @@ def demo_UHD_fast(img, model):
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1, 2, 3'
     args = parse()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Device: {device}')
 
     img = torch.randn(1, 3, 256, 256)
 
@@ -84,10 +86,10 @@ if __name__ == '__main__':
     # model = LapSUNET(dim=12, depth=2, num_heads=3, mlp_ratio=2)
     # with shortcut: 11.02G, 31.95
     # model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2)
-    # with shortcut, customized num_heads: 8.63G, 31.845
-    # model = LapSUNET(dim=14, depth=2, num_heads=[2, 4], mlp_ratio=2)
-    # with LSC, modify order of blocks in downsample: 8.939G, v1.pt
-    model = LapSUNET(dim=16, depth=2, num_heads=[2, 4])
+    # with LSC, reorder downsample block, 8.89G, v1.pt, 31.75
+    # model = LapSUNET(dim=16, depth=2, num_heads=[2, 2], mlp_ratio=2)
+    # concat --> +, reorder downsample, add basicblock depth=4, 10.637G, 31.76
+    model = LapSUNET(dim=16, depth=2, num_heads=[2, 4], mlp_ratio=2)
 
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
@@ -97,8 +99,8 @@ if __name__ == '__main__':
     model = nn.DataParallel(model)
 
     # model path
-    model_checkpoint_path = 'checkpoints/lapsunet_v1.pt'
-    model_best_path = 'checkpoints/lapsunet_best_v1.pt'
+    model_checkpoint_path = 'checkpoints/lapsunet_v2.pt'
+    model_best_path = 'checkpoints/lapsunet_v2_best.pt'
 
     # basic setup
     best_psnr = 0
@@ -106,12 +108,14 @@ if __name__ == '__main__':
     epochs = args.epochs
     batch_size = args.batch
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.05*args.lr)
+    # optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch_optimizer.Lamb(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.001*args.lr)
     epoch = 0
 
     # Loading from best
     if os.path.exists(model_best_path):
+        print(f'Loading state_dict from {model_best_path}')
         checkpoint = torch.load(model_best_path)
         best_psnr = checkpoint['best_psnr']
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -133,11 +137,11 @@ if __name__ == '__main__':
     # datasets & dataloaders
     # for each training data --> input size = (B, 3, 256, 256), output size = (B, 3, 768, 768)
     # I generate those 256 x 256 sub images w/ utils/img_proc.py
-    LQ_train_path = ['/data/SR/div2k/LRbicx3', '/data/SR/flickr2k/LRbicx3', '/data/SR/div2k/LRunkx3', '/data/SR/flickr2k/LRunkx3']      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
-    GT_train_path = ['/data/SR/div2k/original', '/data/SR/flickr2k/original', '/data/SR/div2k/original', '/data/SR/flickr2k/original']  # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    LQ_train_path = ["/work/u0810886/SR/div2k/LRbicx3/", "/work/u0810886/SR/flickr2k/LRbicx3/"]      # 800 pic + 2650 pic -> 5088 patches + 16377 patches
+    GT_train_path = ["/work/u0810886/SR/div2k/original/", "/work/u0810886/SR/flickr2k/original/"]    # 800 pic + 2650 pic -> 5088 patches + 16377 patches
 
-    LQ_valid_path = ["/data/SR/Set5/LRbicx3/"]    # 5 pic
-    GT_valid_path = ["/data/SR/Set5/original/"]   # 5 pic
+    LQ_valid_path = ["/work/u0810886/SR/Set5/LRbicx3/"]    # 5 pic
+    GT_valid_path = ["/work/u0810886/SR/Set5/original/"]   # 5 pic
 
     train_ds = datasetSR(lq_paths=LQ_train_path, gt_paths=GT_train_path)
     train_dl = DataLoader(train_ds, shuffle=True, batch_size=batch_size, num_workers=8)

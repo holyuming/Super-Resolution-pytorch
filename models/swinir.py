@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from thop import profile
+from torchsummary import summary
 
 
 
@@ -161,6 +162,34 @@ class WindowAttention(nn.Module):
         return flops
 
 
+class ChannelAttentionBlock(nn.Module):
+    '''
+        input   : B, H, W, C
+        output  : B, H, W, C
+    '''
+    def __init__(self, in_channel):
+        super(ChannelAttentionBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.conv1 = nn.Conv2d(in_channel, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        self.conv2 = nn.Conv2d(1, in_channel, kernel_size=1, stride=1, padding=0, bias=False)
+        self.LeakyReLU = nn.LeakyReLU(inplace=True)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        B, H, W, C = x.shape
+        x = x.permute(0, 3, 1, 2).contiguous()  # from B, H, W, C --> B, C, H, W
+        y = self.conv2(self.LeakyReLU(self.conv1(x)))
+        
+        avg_out = self.sigmoid(self.conv2(self.LeakyReLU(self.conv1(self.avg_pool(y)))))
+        out = avg_out * y
+        out = out.permute(0, 2, 3, 1).contiguous() # from B, C, H, W --> B, H, W, C
+        
+        return out
+
+
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
     Args:
@@ -204,6 +233,7 @@ class SwinTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.cab = ChannelAttentionBlock(in_channel=dim)
 
         if self.shift_size > 0:
             attn_mask = self.calculate_mask(self.input_resolution)
@@ -243,6 +273,7 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
+        y = self.cab(x)
 
         # cyclic shift
         if self.shift_size > 0:
@@ -272,7 +303,8 @@ class SwinTransformerBlock(nn.Module):
         x = x.view(B, H * W, C)
 
         # FFN
-        x = shortcut + self.drop_path(x)
+        y = y.view(B, H * W, C)
+        x = shortcut + self.drop_path(x) + 0.1*y
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
@@ -844,27 +876,18 @@ class SwinIR(nn.Module):
 if __name__ == '__main__':
     upscale = 3
     window_size = 8
-    # height = (1024 // upscale // window_size + 1) * window_size
-    # width = (720 // upscale // window_size + 1) * window_size
 
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     height = 256
     width = 256
-    # model = SwinIR(upscale=3, img_size=(height, width),
-    #                window_size=window_size, img_range=1., depths=[2],
-    #                embed_dim=12, num_heads=[1], mlp_ratio=2, upsampler='pixelshuffledirect')
 
     model = SwinIR(upscale=3, in_chans=3, img_size=256, window_size=8,
-                img_range=1., depths=[1, 1], embed_dim=18, num_heads=[1, 2],
+                img_range=1., depths=[2, 2, 2, 2], embed_dim=24, num_heads=[3, 3, 3, 3],
                 mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
-
-    # print(model)
-    # print(height, width, model.flops() / 1e9)
-
-
-    x = torch.randn((1, 3, 1280, 720)).to(device)
+    
+    summary(model, (3, 256, 256))
+    x = torch.randn((1, 3, 256, 256)).to(device)
     macs, params = profile(model, inputs=(x, ))
     print('macs: {} G, flops: {} G'.format(macs / 1e9, macs * 2 / 1e9))
-    out = model(x)
-    print(out.shape)
+    print(f'Flops: {macs * 2 * 15 * 60 / 1e9} G, for 720p cut into 15 patches and 60fps.')

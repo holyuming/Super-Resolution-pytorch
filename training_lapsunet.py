@@ -87,7 +87,9 @@ if __name__ == '__main__':
     # with shortcut: 11.02G, 31.95
     # model = LapSUNET(dim=16, depth=2, num_heads=2, mlp_ratio=2)
     # with LSC, reorder downsample block, 8.89G, v1.pt, 31.75
-    model = LapSUNET(dim=16, depth=2, num_heads=[2, 2], mlp_ratio=2)
+    # model = LapSUNET(dim=16, depth=2, num_heads=[2, 2], mlp_ratio=2)
+    # concat --> +, reorder downsample, add basicblock depth=4, 10.637G, 31.76
+    model = LapSUNET(dim=16, depth=2, num_heads=[2, 4], mlp_ratio=2)
 
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
@@ -97,8 +99,8 @@ if __name__ == '__main__':
     model = nn.DataParallel(model)
 
     # model path
-    model_checkpoint_path = 'checkpoints/lapsunet_v1.pt'
-    model_best_path = 'checkpoints/lapsunet_v1_best.pt'
+    model_checkpoint_path = 'checkpoints/lapsunet_v2.pt'
+    model_best_path = 'checkpoints/lapsunet_v2_best.pt'
 
     # basic setup
     best_psnr = 0

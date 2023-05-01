@@ -98,7 +98,7 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
@@ -119,7 +119,7 @@ class WindowAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C).contiguous()
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -173,12 +173,12 @@ class ChannelAttentionBlock(nn.Module):
 
     def forward(self, x):
         B, H, W, C = x.shape
-        x = x.permute(0, 3, 1, 2)  # from B, H, W, C --> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()  # from B, H, W, C --> B, C, H, W
         y = self.conv2(self.LeakyReLU(self.conv1(x)))
         
         avg_out = self.sigmoid(self.conv2(self.LeakyReLU(self.conv1(self.avg_pool(y)))))
         out = avg_out * y
-        out = out.permute(0, 2, 3, 1) # from B, C, H, W --> B, H, W, C
+        out = out.permute(0, 2, 3, 1).contiguous() # from B, C, H, W --> B, H, W, C
         
         return out
 
@@ -267,7 +267,7 @@ class HybridAttentionBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
-        y = self.cab(x) # B, H, W, C
+        # y = self.cab(x) # B, H, W, C
 
         # cyclic shift
         if self.shift_size > 0:
@@ -324,7 +324,7 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         # B, C, H, W --> B, C, H*W --> B, H*W, C
-        x = x.flatten(2).transpose(1, 2)  # B Ph*Pw C
+        x = x.flatten(2).transpose(1, 2).contiguous()  # B Ph*Pw C
         if self.norm is not None:
             x = self.norm(x)
         return x
@@ -346,7 +346,7 @@ class PatchUnEmbed(nn.Module):
     def forward(self, x, x_size):
         # B, H*W, C --> B, C, H*W --> B, C, H, W
         B, HW, C = x.shape
-        x = x.transpose(1, 2).view(B, self.embed_dim, x_size[0], x_size[1])  # B Ph*Pw C
+        x = x.transpose(1, 2).contiguous().view(B, self.embed_dim, x_size[0], x_size[1])  # B Ph*Pw C
         return x
 
 
@@ -355,7 +355,7 @@ class BasicBlock(nn.Module):
         input size  : B, C, H, W
         output size : B, C, H, W
     """
-    def __init__(self, in_channel, out_channel, depth=2, num_heads=2, window_size=8,
+    def __init__(self, in_channel, out_channel, depth=4, num_heads=2, window_size=8,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
                  img_size=256, patch_size=4):
@@ -421,7 +421,7 @@ class Upsample(nn.Module):
     def __init__(self, in_channel, out_channel, num_heads=2, mlp_ratio=4, patch_size=4, window_size=8, img_size=256) -> None:
         super(Upsample, self).__init__()
         self.up = nn.ConvTranspose2d(in_channel, out_channel, kernel_size=2, stride=2)
-        self.block = BasicBlock(in_channel=in_channel, out_channel=out_channel,
+        self.block = BasicBlock(in_channel=out_channel, out_channel=out_channel,
                                 num_heads=num_heads,
                                 mlp_ratio=mlp_ratio,
                                 patch_size=patch_size,
@@ -435,7 +435,7 @@ class Upsample(nn.Module):
         up_x = self.up(x)
         x_size = (skip.shape[2], skip.shape[3])
         convskip = self.conv(skip)    # calculate the difference between orignal img & upgraded img (idea from laplacian pyramid)
-        x = self.block(torch.cat([convskip, up_x], dim=1), x_size)
+        x = self.block((convskip + up_x), x_size)
         return x
 
 
@@ -460,16 +460,14 @@ class LapSUNET(nn.Module):
         imgsz = img_size
         self.downs = nn.ModuleList()
         for _ in range(depth):
-            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads[_], mlp_ratio=mlp_ratio, patch_size=patch_size[_], img_size=imgsz))
+            self.downs.append(downblock(n_dim, n_dim*2, num_heads=num_heads[_], mlp_ratio=mlp_ratio))
             n_dim *= 2
-            imgsz //= 2
 
         # Upward path
         self.ups = nn.ModuleList()
         for _ in range(depth):
-            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads[-1*(_+1)], mlp_ratio=mlp_ratio, patch_size=patch_size[-1*(_+1)], img_size=imgsz*2))
+            self.ups.append(upblock(n_dim, n_dim//2, num_heads=num_heads[-1*(_+1)], mlp_ratio=mlp_ratio))
             n_dim //= 2
-            imgsz *= 2
 
         
         # Reconstruction
@@ -503,7 +501,7 @@ class LapSUNET(nn.Module):
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1, 2, 3'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = LapSUNET(dim=16, depth=2, num_heads=[2, 4], mlp_ratio=2).to(device)
     summary(model, (3, 256, 256))

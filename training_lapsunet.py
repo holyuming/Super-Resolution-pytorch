@@ -9,6 +9,7 @@ import numpy as np
 import time
 import math
 from datetime import datetime
+from collections import OrderedDict
 
 from datasets import datasetSR
 from torchvision import transforms
@@ -61,12 +62,10 @@ def demo_UHD_fast(img, model):
     for ii, h_idx in enumerate(h_idx_list):
         for jj, w_idx in enumerate(w_idx_list):
             idx = ii * len(w_idx_list) + jj
-            # print(idx)
             out_patch_mask = torch.ones_like(out_patch[idx])
 
             E[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch[idx])
             W[..., h_idx*scale:(h_idx+tile)*scale, w_idx*scale:(w_idx+tile)*scale].add_(out_patch_mask)
-            
             
     output = E.div_(W)
     return output
@@ -93,7 +92,7 @@ if __name__ == '__main__':
 
     macs, params = profile(model, inputs=(img, ))
     print(f'FLOPs: {macs * 2 / 1e9} G, for input size: {img.shape}')
-    print(f'Flops: {macs * 2 * 15 * 60 / 1e9} G, for 720p cut into 15 patches and 60fps.')
+    print(f'Flops: {macs * 2 * 15 * 60 / 1e12} T, for 720p cut into 15 patches and 60fps.')
 
     model = model.to(device)
     model = nn.DataParallel(model)
@@ -262,35 +261,59 @@ if __name__ == '__main__':
         print(f'Loading state_dict from {model_best_path}')
         model.load_state_dict(checkpoint['model_state_dict'])  
     model.eval()
-    psnrs = []
+    test_results = OrderedDict()
+    test_results['psnr'] = []
+    test_results['ssim'] = []
+    test_results['psnr_y'] = []
+    test_results['ssim_y'] = []
+    test_results['psnrb'] = []
+    test_results['psnrb_y'] = []
+    psnr, ssim, psnr_y, ssim_y, psnrb, psnrb_y = 0, 0, 0, 0, 0, 0
+    border = 0
     for idx, data in enumerate(valid_dl):
-        img_name = data[0][0]
+        imgname = data[0][0]
         img_lq = data[1].to(device)
         img_gt = data[2].to(device)
+        
+        # inference
         with torch.no_grad():
-            _, _, h_old, w_old = img_lq.size()
+            # pad input image to be a power of 2
+            _, _, h_old, w_old = img_lq.shape
             h_pad = (2 ** math.ceil(math.log2(h_old))) - h_old
             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-
             output = demo_UHD_fast(img_lq, model)
-            preds = (output[:, :, :h_old*args.scale, :w_old*args.scale].clamp(0, 1) * 255).round()
-            # save result img
-            if args.savedir != None:
-                if not os.path.isdir(args.savedir):
-                    os.mkdir(args.savedir)
-                save_img = (output.clamp(0, 1) * 255).round().data.squeeze().cpu().numpy()
-                if save_img.ndim == 3:
-                    save_img = np.transpose(save_img[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HCW-BGR
-                save_img = save_img[:h_old*args.scale, :w_old*args.scale].astype(np.uint8)  # float32 to uint8
-                cv2.imwrite(os.path.join(args.savedir, img_name), save_img)
+            output = (output[..., :h_old * args.scale, :w_old * args.scale].clamp(0, 1) * 255).round()
+            output = output.squeeze().cpu().numpy().astype(np.uint8)
 
-        img_gt = (img_gt[:, :, :h_old*args.scale, :w_old*args.scale] * 255.).round()
+        # evaluate psnr/ssim/psnr_b
+        if img_gt is not None:
+            img_gt = (img_gt * 255.0).cpu().numpy().round().astype(np.uint8)  # float32 to uint8
+            img_gt = img_gt[..., :h_old * args.scale, :w_old * args.scale]  # crop gt
+            img_gt = np.squeeze(img_gt)
 
-        psnr = util.psnr_tensor(preds, img_gt)
-        psnrs.append(psnr)
-        print(f'Tesing: {img_name:20s}, PSNR: {psnr}')
-        
-    psnrs = torch.tensor(psnrs)
-    print(f'\nAverage PSNR: {psnrs.mean()}\n')
+            psnr = util.calculate_psnr(output, img_gt, crop_border=border, input_order='CHW')
+            ssim = util.calculate_ssim(output, img_gt, crop_border=border, input_order='CHW')
+            test_results['psnr'].append(psnr)
+            test_results['ssim'].append(ssim)
+            if img_gt.ndim == 3:  # RGB image
+                psnr_y = util.calculate_psnr(output, img_gt, crop_border=border, test_y_channel=True, input_order='CHW')
+                ssim_y = util.calculate_ssim(output, img_gt, crop_border=border, test_y_channel=True, input_order='CHW')
+                test_results['psnr_y'].append(psnr_y)
+                test_results['ssim_y'].append(ssim_y)
+            print('Testing {:3s} {:20s} - PSNR: {:.4f} dB; SSIM: {:.4f}; '
+                  'PSNR_Y: {:.4f} dB; SSIM_Y: {:.4f}.'.
+                  format(str(idx), imgname, psnr, ssim, psnr_y, ssim_y))
+        else:
+            print('Testing {:3d} {:20s}'.format(idx, imgname))
+
+    # summarize psnr/ssim
+    if img_gt is not None:
+        ave_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
+        ave_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
+        print('\n-- Average PSNR/SSIM(RGB): {:.4f} dB; {:.4f}'.format(ave_psnr, ave_ssim))
+        if img_gt.ndim == 3:
+            ave_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
+            ave_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
+            print('-- Average PSNR_Y/SSIM_Y: {:.4f} dB; {:.4f}'.format(ave_psnr_y, ave_ssim_y))

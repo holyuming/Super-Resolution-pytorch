@@ -267,7 +267,7 @@ class HybridAttentionBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
-        # y = self.cab(x) # B, H, W, C
+        y = self.cab(x) # B, H, W, C
 
         # cyclic shift
         if self.shift_size > 0:

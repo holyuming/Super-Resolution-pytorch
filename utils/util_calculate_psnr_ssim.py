@@ -11,15 +11,12 @@ def psnr_tensor(img1, img2):
     Returns:
         float: psnr result
     """
-    # assert img1.shape == img2.shape, (f'Image shapes are differnet: {img1.shape}, {img2.shape}.')
-    if img1.shape != img2.shape:
-        print(f'Image shapes are different: {img1.shape}, {img2.shape}.')
-        exit()
+    assert img1.shape == img2.shape, (f'Image shapes are differnet: {img1.shape}, {img2.shape}.')
 
-    mse = ((img1 - img2) ** 2).mean().cpu().numpy()
-    if mse == 0:
+    sqrt_mse = ((img1 - img2)**2).mean().sqrt()
+    if sqrt_mse == 0:
         return float('inf')
-    return 20. * np.log10(255. / np.sqrt(mse))
+    return 20 * torch.log10(255. / sqrt_mse)
 
 
 

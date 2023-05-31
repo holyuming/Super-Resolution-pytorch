@@ -15,7 +15,7 @@ from datasets import datasetSR
 from torchvision import transforms
 
 from torch.utils.data.dataloader import DataLoader
-from models.swinir import SwinIR
+from models.hat import HAT
 from utils import util_calculate_psnr_ssim as util
 import torch_optimizer
 
@@ -54,8 +54,6 @@ def demo_UHD_fast(img, model):
             in_patch.append(img[..., h_idx:h_idx+tile, w_idx:w_idx+tile].squeeze(0))
 
     in_patch = torch.stack(in_patch, 0)
-    # print(in_patch.shape)
-    
     out_patch = model(in_patch)
     
     for ii, h_idx in enumerate(h_idx_list):
@@ -74,20 +72,14 @@ if __name__ == '__main__':
     args = parse()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # original model
-    # model pretrained weight path = 'pretrained_weight/swinir/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x3.pth'
-    # model = SwinIR(upscale=args.scale, in_chans=3, img_size=64, window_size=8,
-    #             img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
-    #             mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
-
     img = torch.randn(1, 3, 256, 256).to(device)
 
-
-    # our model
-    # v1 --> 32.1 dB
-    model = SwinIR(upscale=args.scale, in_chans=3, img_size=256, window_size=8,
-                img_range=1., depths=[2, 2, 2, 2], embed_dim=24, num_heads=[3, 3, 3, 3],
-                mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
+    # v1 (customized_lightweight_sr HAT), 10G for input [1, 3, 256, 256], PSNR: 32.1134 dB, PSNRY: 34.1501 dB
+    model = HAT( 
+        img_size=256, patch_size=1, in_chans=3, embed_dim=24, depths=(2, 2, 2), num_heads=(3, 3, 3), 
+        window_size=8, compress_ratio=4, squeeze_factor=30, conv_scale=0.1, overlap_ratio=0.5, mlp_ratio=2., 
+        qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1, norm_layer=nn.LayerNorm,
+        ape=False, patch_norm=True, use_checkpoint=False, upscale=3, img_range=1., upsampler='pixelshuffledirect', resi_connection='1conv').to(device)
 
     # model path
     macs, params = profile(model, inputs=(img, ))
@@ -98,8 +90,8 @@ if __name__ == '__main__':
     model = nn.DataParallel(model)
 
     # model path
-    model_checkpoint_path = 'checkpoints/swinir_v1.pt'
-    model_best_path = 'checkpoints/swinir_v1_best.pt'
+    model_checkpoint_path = 'checkpoints/hat_v1.pt'
+    model_best_path = 'checkpoints/hat_v1_best.pt'
 
     # basic setup
     best_psnr = 0
@@ -107,8 +99,8 @@ if __name__ == '__main__':
     epochs = args.epochs
     batch_size = args.batch
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    # optimizer = torch_optimizer.Lamb(model.parameters(), lr=args.lr)
+    # optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch_optimizer.Lamb(model.parameters(), lr=args.lr)
     # optimizer = optim.SGD(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.1*args.lr)
     epoch = 0
@@ -285,7 +277,6 @@ if __name__ == '__main__':
             w_pad = (2 ** math.ceil(math.log2(w_old))) - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-            
             output = demo_UHD_fast(img_lq, model)
             output = (output[..., :h_old * args.scale, :w_old * args.scale].clamp(0, 1) * 255).round()
             output = output.squeeze().cpu().numpy().astype(np.uint8)
